@@ -1,0 +1,1 @@
+# kube-python-azure-sql-workload-identity-sample
