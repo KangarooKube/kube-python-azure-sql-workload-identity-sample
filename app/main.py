@@ -5,7 +5,7 @@ from flask import Flask, render_template
 from flask_sqlalchemy import SQLAlchemy
 import jwt
 from datetime import datetime
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, WorkloadIdentityCredential
 import pyodbc
 from logging.config import dictConfig
 from tzlocal import get_localzone_name
@@ -34,8 +34,8 @@ dictConfig(
 pyodbc.pooling = False
 
 # define connection string variables
-server_name = os.environ.get("SERVERNAME", "drocx-eus1")
-database_name = os.environ.get("DATABASENAME", "free-db")
+server_name = os.environ.get("SERVERNAME")
+database_name = os.environ.get("DATABASENAME")
 driver = "{ODBC Driver 18 for SQL Server}"
 connection_string = (f"Driver={driver};Server=tcp:{server_name}.database.windows.net,1433;Database={database_name};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30")
 
@@ -47,11 +47,11 @@ db = SQLAlchemy()
 app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = "mssql+pyodbc:///?odbc_connect=%s" % connection_string
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-  "pool_recycle": 1799, # kill the pool before Azure SQL gateway kills the connection
-  "pool_pre_ping": True, # test connection before use
-  "echo_pool": True, # log pool actions
-  "echo": True, # log database statements and calls
-  "pool_timeout": 30 # limit time waiting for connection from pool
+  "pool_recycle": 1799, # recommended: kill the pool before Azure SQL gateway kills the connection at 30 mins of inactivity
+  "pool_pre_ping": True, # recommended: test connection before use to catch token expiry or other transient errors
+  "echo_pool": True, # recommended: log pool actions to know when pooled connections drop
+  "echo": False, # optional: log database statements and calls
+  "pool_timeout": 30 # optional: limit time waiting for connection from pool
 }
 db.init_app(app)
 
@@ -63,7 +63,14 @@ def azure_jwt_expiry(token):
 
 # function to generate Azure SQL specific access token and log token expiry
 def get_azure_sql_odbc_token():
-  credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
+  # speed up token generation is Workload Identity is enabled to skip testing other methods
+  if os.environ.get("AZURE_FEDERATED_TOKEN_FILE"):
+    credential = WorkloadIdentityCredential()
+    app.logger.info(f"Using Workload Identity for Token Generation")
+  else:
+    credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
+    app.logger.info(f"Using Default Azure Credential for Token Generation")
+  
   token = credential.get_token("https://database.windows.net/.default").token
   token_bytes = token.encode("UTF-16-LE")
   token_expiry = azure_jwt_expiry(token)
@@ -83,16 +90,16 @@ with app.app_context():
 @app.route('/', methods=['GET'])
 def home():
   query = text("SELECT @@SERVERNAME as serverName, DB_NAME() as databaseName, @@VERSION as serverVersion")
-  dt = datetime.now()
-  tz = get_localzone_name()
+  current_datatime = datetime.now()
+  time_zone = get_localzone_name()
   try: 
     results = db.session.execute(query).first()
   finally:
     db.session.remove()
   app.logger.info(f"Query Results: {results}")
-  serverName = results[0]
-  databaseName = results[1]
-  serverVersion = results[2]
-  return render_template('index.html', serverName=serverName, databaseName=databaseName, serverVersion=serverVersion, currentDatatime=dt, timeZone=tz)
+  server_name = results[0]
+  database_name = results[1]
+  server_version = results[2]
+  return render_template('index.html', serverName=server_name, databaseName=database_name, serverVersion=server_version, currentDatatime=current_datatime, timeZone=time_zone)
 
 app.run(host='0.0.0.0', port=8080)
