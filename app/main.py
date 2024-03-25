@@ -63,28 +63,36 @@ def azure_jwt_expiry(token):
 
 # function to generate Azure SQL specific access token and output along with token expiry
 def get_azure_sql_odbc_token():
-  # speed up token generation is Workload Identity is enabled to skip testing other methods
-  if os.environ.get("AZURE_FEDERATED_TOKEN_FILE"):
-    credential = WorkloadIdentityCredential()
-    app.logger.info(f"Using Workload Identity for Token Generation")
-  else:
-    credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
-    app.logger.info(f"Using Default Azure Credential for Token Generation")
-  # obtain Azure SQL specific scoped token
-  token = credential.get_token("https://database.windows.net/.default").token
-  token_bytes = token.encode("UTF-16-LE")
-  token_expiry = azure_jwt_expiry(token)
-  token_struct = struct.pack(f'<I{len(token_bytes)}s', len(token_bytes), token_bytes)
-  return token_struct, token_expiry
+  try:
+    # speed up token generation is Workload Identity is enabled to skip testing other methods
+    if os.environ.get("AZURE_FEDERATED_TOKEN_FILE"):
+      credential = WorkloadIdentityCredential()
+      app.logger.info(f"Using Workload Identity for token generation.")
+    else:
+      # use DefaultAzureCredential for local development and testing
+      credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
+      app.logger.info(f"Using Default Azure Credential for token generation.")
+    # obtain Azure SQL specific scoped token
+    token = credential.get_token("https://database.windows.net/.default").token
+    token_bytes = token.encode("UTF-16-LE")
+    token_expiry = azure_jwt_expiry(token)
+    token_struct = struct.pack(f'<I{len(token_bytes)}s', len(token_bytes), token_bytes)
+    return token_struct, token_expiry
+  except Exception:
+    app.logger.error(f"Token generation failed!")
+    return
 
 # a listener to hijack all database connections and inject access token
 with app.app_context():
   @event.listens_for(db.engine, "do_connect")
   def provide_token(dialect, conn_rec, cargs, cparams):
     token = get_azure_sql_odbc_token()
-    token_struct = token[0]
-    app.logger.info(f"Token Expiry: {token[1]}")
-    cparams["attrs_before"] = {SQL_COPT_SS_ACCESS_TOKEN: token_struct}
+    if not token:
+      raise Exception("Token returned as empty value!")
+    else:
+      token_struct = token[0]
+      app.logger.info(f"Token expiry: {token[1]}")
+      cparams["attrs_before"] = {SQL_COPT_SS_ACCESS_TOKEN: token_struct}
 
 # simple default site to bring back Azure SQL version as a page
 @app.route('/', methods=['GET'])
@@ -94,9 +102,12 @@ def home():
   time_zone = get_localzone_name()
   try: 
     results = db.session.execute(query).first()
+  except Exception as e:
+    app.logger.error(e)
+    return f"<p>Query failed review logs!</p>"
   finally:
     db.session.remove()
-  app.logger.info(f"Query Results: {results}")
+  app.logger.info(f"Query results: {results}")
   server_name = results[0]
   database_name = results[1]
   server_version = results[2]
