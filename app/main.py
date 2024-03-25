@@ -61,7 +61,7 @@ def azure_jwt_expiry(token):
   token_expiry = datetime.fromtimestamp(int(decoded_token['exp'])) 
   return token_expiry 
 
-# function to generate Azure SQL specific access token and log token expiry
+# function to generate Azure SQL specific access token and output along with token expiry
 def get_azure_sql_odbc_token():
   # speed up token generation is Workload Identity is enabled to skip testing other methods
   if os.environ.get("AZURE_FEDERATED_TOKEN_FILE"):
@@ -70,7 +70,7 @@ def get_azure_sql_odbc_token():
   else:
     credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
     app.logger.info(f"Using Default Azure Credential for Token Generation")
-  
+  # obtain Azure SQL specific scoped token
   token = credential.get_token("https://database.windows.net/.default").token
   token_bytes = token.encode("UTF-16-LE")
   token_expiry = azure_jwt_expiry(token)
