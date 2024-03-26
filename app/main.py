@@ -78,7 +78,8 @@ def get_azure_sql_odbc_token():
     token_expiry = azure_jwt_expiry(token)
     token_struct = struct.pack(f'<I{len(token_bytes)}s', len(token_bytes), token_bytes)
     return token_struct, token_expiry
-  except Exception:
+  except Exception as e:
+    app.logger.error(e)
     app.logger.error(f"Token generation failed!")
     return
 
