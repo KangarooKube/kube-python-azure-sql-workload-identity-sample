@@ -104,7 +104,7 @@ def home():
     results = db.session.execute(query).first()
   except Exception as e:
     app.logger.error(e)
-    return f"<p>Query failed review logs!</p>"
+    return f"<p>Query failed review logs!</p>", 500
   finally:
     db.session.remove()
   app.logger.info(f"Query results: {results}")
