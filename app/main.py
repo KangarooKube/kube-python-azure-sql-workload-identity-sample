@@ -1,12 +1,13 @@
 import struct
 import os
 from sqlalchemy import text, event
-from flask import Flask, render_template
+from flask import Flask, render_template, jsonify
 from flask_sqlalchemy import SQLAlchemy
 import jwt
 from datetime import datetime
 from azure.identity import DefaultAzureCredential, WorkloadIdentityCredential
 import pyodbc
+import json
 from logging.config import dictConfig
 from tzlocal import get_localzone_name
 
@@ -53,34 +54,49 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
   "echo": False, # optional: log database statements and calls
   "pool_timeout": 30 # optional: limit time waiting for connection from pool
 }
+app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 db.init_app(app)
 
 # function to display token expiry
-def azure_jwt_expiry(token): 
+def get_azure_jwt_expiry(token): 
   decoded_token = jwt.decode(token, options={"verify_signature": False})
   token_expiry = datetime.fromtimestamp(int(decoded_token['exp'])) 
   return token_expiry 
+
+def get_azure_federated_token():
+  token = open(os.environ.get("AZURE_FEDERATED_TOKEN_FILE"), "r")
+  decoded_token = jwt.decode(token.read(), options={"verify_signature": False})
+  return decoded_token
+
+def get_azure_sql_token():
+    try:
+    # speed up token generation is Workload Identity is enabled to skip testing other methods
+      if os.environ.get("AZURE_FEDERATED_TOKEN_FILE"):
+        credential = WorkloadIdentityCredential()
+        app.logger.info(f"Using Workload Identity for token Azure token generation.")
+      else:
+        # use DefaultAzureCredential for local development and testing
+        credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
+        app.logger.info(f"Using Default Azure Credential for token diagnostics.")
+      token = credential.get_token("https://database.windows.net/.default").token
+      return token
+    except Exception as e:
+      app.logger.error(e)
+      app.logger.error(f"Azure SQL token generation failed!")
+      return
 
 # function to generate Azure SQL specific access token and output along with token expiry
 def get_azure_sql_odbc_token():
   try:
     # speed up token generation is Workload Identity is enabled to skip testing other methods
-    if os.environ.get("AZURE_FEDERATED_TOKEN_FILE"):
-      credential = WorkloadIdentityCredential()
-      app.logger.info(f"Using Workload Identity for token generation.")
-    else:
-      # use DefaultAzureCredential for local development and testing
-      credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
-      app.logger.info(f"Using Default Azure Credential for token generation.")
-    # obtain Azure SQL specific scoped token
-    token = credential.get_token("https://database.windows.net/.default").token
+    token = get_azure_sql_token()
     token_bytes = token.encode("UTF-16-LE")
-    token_expiry = azure_jwt_expiry(token)
+    token_expiry = get_azure_jwt_expiry(token)
     token_struct = struct.pack(f'<I{len(token_bytes)}s', len(token_bytes), token_bytes)
     return token_struct, token_expiry
   except Exception as e:
     app.logger.error(e)
-    app.logger.error(f"Token generation failed!")
+    app.logger.error(f"ODBC token struct generation failed!")
     return
 
 # a listener to hijack all database connections and inject access token
@@ -113,5 +129,26 @@ def home():
   database_name = results[1]
   server_version = results[2]
   return render_template('index.html', serverName=server_name, databaseName=database_name, serverVersion=server_version, currentDatatime=current_datatime, timeZone=time_zone)
+
+# endpoint to see Azure SQL token that is being generated
+@app.route('/diagnostics/azuresqltoken', methods=['GET'])
+def diagnostics_azure_sql_token():
+  try: 
+    token = get_azure_sql_token()
+    decoded_token = jwt.decode(token, options={"verify_signature": False})
+    return jsonify(decoded_token)
+  except Exception as e:
+    app.logger.error(e)
+    return f"<p>Query failed get Azure SQL token!</p>", 500
+
+# endpoint to see Azure Workload Identity Federation token being passed to OIDC endpoint
+@app.route('/diagnostics/azurefederationtoken', methods=['GET'])
+def diagnostics_azure_federation_token():
+  try: 
+    decoded_token = get_azure_federated_token()
+    return jsonify(decoded_token)
+  except Exception as e:
+    app.logger.error(e)
+    return f"<p>Query failed get Azure Workload Identity Federation token!</p>", 500
 
 app.run(host='0.0.0.0', port=8080)
