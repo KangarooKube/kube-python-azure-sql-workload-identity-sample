@@ -1,4 +1,4 @@
-FROM python:3.11-bookworm
+FROM python:3.12-bookworm
 
 ARG USERNAME=containeruser
 ARG USER_UID=1000
